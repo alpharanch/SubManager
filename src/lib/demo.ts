@@ -38,6 +38,15 @@ const WORDS: Record<Topic, string[]> = {
   science: ['블랙홀', '양자역학', '인공지능', '기후 변화', '로마 제국', '금리', '수면 과학', '화성 탐사'],
 };
 
+const TOPIC_NAMES: Record<Topic, string> = {
+  cook: 'Food',
+  dev: 'Technology',
+  game: 'Video game culture',
+  music: 'Music',
+  life: 'Lifestyle (sociology)',
+  science: 'Knowledge',
+};
+
 const DAY = 86_400_000;
 const DELETED_KEY = 'submanager:demo:deleted';
 
@@ -90,6 +99,7 @@ const channels: DemoChannel[] = CHANNELS.map(([title, topic], i) => {
       subscriberCount: rand() < 0.08 ? null : Math.round(10 ** (3 + rand() * 3.5)),
       videoCount: lastUploadDaysAgo === null ? 0 : Math.round(20 + rand() * 900),
       uploadsPlaylistId: `UU${id.slice(2)}`,
+      topics: [TOPIC_NAMES[topic]],
     },
     lastUploadDaysAgo,
     gapDays,

@@ -21,6 +21,8 @@ export interface ChannelStats {
   subscriberCount: number | null;
   videoCount: number | null;
   uploadsPlaylistId: string | null;
+  /** YouTube's topic categories for the channel, e.g. "Music", "Video game culture". */
+  topics?: string[];
 }
 
 export interface Video {

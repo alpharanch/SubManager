@@ -24,13 +24,24 @@ export function subscriptionsCsv(
   activity: Record<string, ChannelActivity>,
   groups: Group[],
 ): string {
-  const header = ['채널', '채널 주소', '구독 시작일', '마지막 업로드', '구독자 수', '영상 수', '그룹'];
+  const header = ['채널', '채널 ID', '채널 주소', '구독 시작일', '마지막 업로드', '구독자 수', '영상 수', '그룹', '주제', '설명'];
   const lines = subs.map((s) => {
     const act = activity[s.channelId];
     const st = stats[s.channelId];
     const lastUpload = act ? (act.lastUploadAt ? isoDate(act.lastUploadAt) : '영상 없음') : '';
     const groupNames = groups.filter((g) => g.channelIds.includes(s.channelId)).map((g) => g.name);
-    return [s.title, channelUrl(s.channelId), isoDate(s.subscribedAt), lastUpload, st?.subscriberCount, st?.videoCount, groupNames.join(', ')]
+    return [
+      s.title,
+      s.channelId,
+      channelUrl(s.channelId),
+      isoDate(s.subscribedAt),
+      lastUpload,
+      st?.subscriberCount,
+      st?.videoCount,
+      groupNames.join(', '),
+      st?.topics?.join(', '),
+      s.description,
+    ]
       .map(csvCell)
       .join(',');
   });

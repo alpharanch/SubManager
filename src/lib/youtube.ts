@@ -30,6 +30,7 @@ interface ChannelResource {
   snippet?: { title: string; thumbnails?: Thumbs };
   statistics?: { subscriberCount?: string; hiddenSubscriberCount?: boolean; videoCount?: string };
   contentDetails?: { relatedPlaylists?: { uploads?: string } };
+  topicDetails?: { topicCategories?: string[] };
 }
 
 interface PlaylistItemResource {
@@ -62,6 +63,9 @@ function pickThumb(thumbs: Thumbs | undefined, order: (keyof Thumbs)[]): string 
 }
 
 const toNumber = (v: string | undefined) => (v == null ? null : Number(v));
+
+/** Topic categories come as Wikipedia URLs, e.g. https://en.wikipedia.org/wiki/Video_game_culture. */
+const topicName = (url: string) => decodeURIComponent(url.split('/').pop() ?? url).replace(/_/g, ' ');
 
 function toSubscription(it: SubscriptionResource): Subscription {
   return {
@@ -174,7 +178,7 @@ export const liveApi: YouTubeApi = {
       const r = await call<ListResponse<ChannelResource>>(
         'GET',
         'channels',
-        { part: 'statistics,contentDetails', id: batch.join(','), maxResults: 50 },
+        { part: 'statistics,contentDetails,topicDetails', id: batch.join(','), maxResults: 50 },
         1,
       );
       for (const c of r.items ?? []) {
@@ -182,6 +186,7 @@ export const liveApi: YouTubeApi = {
           subscriberCount: c.statistics?.hiddenSubscriberCount ? null : toNumber(c.statistics?.subscriberCount),
           videoCount: toNumber(c.statistics?.videoCount),
           uploadsPlaylistId: c.contentDetails?.relatedPlaylists?.uploads ?? null,
+          topics: (c.topicDetails?.topicCategories ?? []).map(topicName),
         };
       }
       onProgress(Math.min(i + 50, channelIds.length), channelIds.length);

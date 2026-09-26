@@ -3,5 +3,8 @@ dist/
 *.local
 .env.local
 .claude/
+# Exported subscription lists and group backups are personal; never commit them.
+submanager-*.csv
+submanager-*.json
 .DS_Store
 Thumbs.db
