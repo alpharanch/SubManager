@@ -5,8 +5,11 @@ export type Prompt = '' | 'select_account';
 
 /** Shared by the real YouTube client and the sample-data client. */
 export interface YouTubeApi {
-  /** Resolves true when a new token was obtained (the account may have changed). */
-  ensureAuth(prompt?: Prompt): Promise<boolean>;
+  /**
+   * Resolves true when a new token was obtained (the account may have changed).
+   * `force` asks for a new token even when the current one is valid, e.g. to add the Drive permission.
+   */
+  ensureAuth(prompt?: Prompt, force?: boolean): Promise<boolean>;
   hasValidToken(): boolean;
   signOut(): void;
   fetchMyChannel(): Promise<Account>;

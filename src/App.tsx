@@ -61,12 +61,28 @@ function Screen() {
 
 export default function App() {
   const checkAuth = useStore((s) => s.checkAuth);
+  const syncIfStale = useStore((s) => s.syncIfStale);
 
   // The access token expires after about an hour; keep the login indicator honest.
   useEffect(() => {
     const timer = setInterval(checkAuth, 30_000);
     return () => clearInterval(timer);
   }, [checkAuth]);
+
+  // Coming back to the tab (e.g. after editing groups on the phone) pulls the latest copy from Drive.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      checkAuth();
+      syncIfStale();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [checkAuth, syncIfStale]);
 
   return (
     <>

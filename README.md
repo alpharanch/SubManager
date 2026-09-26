@@ -12,15 +12,18 @@ YouTube 구독 채널을 정리하는 웹앱이에요.
 
 ## 동작 방식
 
-서버 없이 브라우저에서만 동작해요. 브라우저가 Google 계정으로 로그인하고 YouTube Data API를 직접 호출해요.
-구독 목록, 그룹, 구독 취소 기록은 그 브라우저의 IndexedDB에만 저장돼요. 다른 기기에서 쓰려면 그룹 백업 파일을 내보내서 가져오면 돼요.
+별도 서버 없이 브라우저에서 동작해요. 브라우저가 Google 계정으로 로그인하고 YouTube Data API를 직접 호출해요.
+
+- 구독 목록과 업로드 확인 결과는 그 브라우저의 IndexedDB에 저장돼요. 다른 기기에서는 YouTube에서 다시 불러와요.
+- 그룹, 구독 취소 기록, 새 영상을 마지막으로 본 시각은 내 구글 드라이브의 앱 전용 공간(appDataFolder)에도 저장돼요. 이 공간은 드라이브 화면에 보이지 않고 이 앱만 읽을 수 있어요. 다른 기기에서 같은 계정으로 로그인하면 같은 그룹이 보여요.
+- 두 기기에서 같은 그룹을 고치면 나중에 고친 쪽이 남아요. 지운 그룹은 다른 기기에서도 지워져요.
 
 로그인은 약 1시간 유지돼요. 만료돼도 저장된 목록과 그룹은 그대로 볼 수 있고, 새로고침이나 구독 취소를 할 때 다시 로그인하면 돼요.
 
 ## Google Cloud 설정 (처음 한 번)
 
 1. [Google Cloud 콘솔](https://console.cloud.google.com/projectcreate)에서 새 프로젝트를 만들어요.
-2. [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com)를 사용 설정해요.
+2. [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com)와 [Google Drive API](https://console.cloud.google.com/apis/library/drive.googleapis.com)를 사용 설정해요.
 3. Google 인증 플랫폼(Google Auth Platform)에서 시작하기를 누르고 앱 이름과 이메일을 넣어요. 대상은 ‘외부’를 골라요.
 4. 대상(Audience)의 테스트 사용자에 YouTube에 로그인하는 구글 계정 이메일을 추가해요.
 5. 클라이언트(Clients)에서 ‘웹 애플리케이션’ 클라이언트를 만들고, 승인된 JavaScript 원본에 두 주소를 넣어요.
@@ -60,6 +63,7 @@ main 브랜치에 푸시하면 GitHub Actions가 빌드해서 GitHub Pages에 �
 
 - `src/lib/youtube.ts`: YouTube Data API 호출
 - `src/lib/auth.ts`: Google 로그인 (Google Identity Services 토큰 방식)
+- `src/lib/drive.ts`, `src/lib/sync.ts`: 구글 드라이브 저장과 기기 간 병합
 - `src/lib/demo.ts`: 샘플 데이터
 - `src/store.ts`: 앱 상태와 동작 (불러오기, 업로드 확인, 구독 취소, 그룹)
 - `src/components/`: 화면

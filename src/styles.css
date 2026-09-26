@@ -522,6 +522,37 @@ input[type='checkbox'] {
   padding: 8px 10px 4px;
 }
 
+.menu-help,
+.menu-error {
+  margin: 6px 10px;
+  font-size: 12.5px;
+}
+
+.menu-help {
+  color: var(--text-2);
+}
+
+.menu-error {
+  color: var(--danger);
+}
+
+.sync-btn.is-ok {
+  color: var(--ok);
+}
+
+.sync-btn.is-no-access,
+.sync-btn.is-signed-out.is-dirty {
+  color: var(--warn);
+}
+
+.sync-btn.is-error {
+  color: var(--danger);
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
 /* Dialogs */
 
 .dialog {

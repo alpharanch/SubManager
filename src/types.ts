@@ -44,6 +44,8 @@ export interface Group {
   name: string;
   color: string;
   channelIds: string[];
+  /** Last edit time; the newer copy wins when two devices changed the same group. Missing in old data. */
+  updatedAt?: number;
 }
 
 export interface UnsubLogEntry {

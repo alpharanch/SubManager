@@ -1,4 +1,4 @@
-import { YT_SCOPE } from '../config';
+import { DRIVE_SCOPE, YT_SCOPE } from '../config';
 import { AuthError, type Prompt } from './api';
 
 const GIS_SRC = 'https://accounts.google.com/gsi/client';
@@ -7,6 +7,8 @@ const TOKEN_KEY = 'submanager:live:token';
 interface StoredToken {
   value: string;
   expiresAt: number;
+  /** Whether the Drive permission was granted too; the consent screen lets users uncheck it. */
+  drive?: boolean;
 }
 
 const MESSAGES: Record<string, string> = {
@@ -53,7 +55,7 @@ export async function initAuth(clientId: string): Promise<void> {
   await loadScript();
   client = google.accounts.oauth2.initTokenClient({
     client_id: clientId,
-    scope: YT_SCOPE,
+    scope: `${YT_SCOPE} ${DRIVE_SCOPE}`,
     callback: (resp) => {
       const p = pending;
       pending = null;
@@ -66,7 +68,11 @@ export async function initAuth(clientId: string): Promise<void> {
         return;
       }
       // Renew a minute early so a request never starts with a token about to expire.
-      token = { value: resp.access_token, expiresAt: Date.now() + (Number(resp.expires_in) - 60) * 1000 };
+      token = {
+        value: resp.access_token,
+        expiresAt: Date.now() + (Number(resp.expires_in) - 60) * 1000,
+        drive: google.accounts.oauth2.hasGrantedAllScopes(resp, DRIVE_SCOPE),
+      };
       try {
         sessionStorage.setItem(TOKEN_KEY, JSON.stringify(token));
       } catch {
@@ -84,6 +90,11 @@ export async function initAuth(clientId: string): Promise<void> {
 
 export function hasValidToken(): boolean {
   return !!token && token.expiresAt > Date.now();
+}
+
+/** A valid token that also carries the Drive permission. */
+export function hasDriveAccess(): boolean {
+  return hasValidToken() && token!.drive === true;
 }
 
 export function accessToken(): string | null {

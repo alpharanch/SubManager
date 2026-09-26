@@ -1,13 +1,121 @@
 import { useRef, useState, type ChangeEvent } from 'react';
-import { ArchiveRestore, Download, Ellipsis, FileJson, LogIn, LogOut, Trash2, Upload, UserRound } from 'lucide-react';
+import {
+  ArchiveRestore,
+  Cloud,
+  CloudAlert,
+  CloudCheck,
+  CloudOff,
+  Download,
+  Ellipsis,
+  FileJson,
+  LogIn,
+  LogOut,
+  RefreshCw,
+  Trash2,
+  Upload,
+  UserRound,
+} from 'lucide-react';
 import type { Backup } from '../types';
 import { DAILY_QUOTA, WRITE_COST } from '../config';
 import { channelUrl } from '../lib/api';
 import { tokenExpiresAt } from '../lib/auth';
 import { downloadFile, parseBackup, subscriptionsCsv } from '../lib/files';
-import { formatDate, formatNumber, isoDate } from '../lib/format';
+import { formatDate, formatNumber, isoDate, timeAgo } from '../lib/format';
 import { useStore } from '../store';
 import { Avatar, Dialog, Logo, Popover } from './ui';
+
+type SyncState = 'running' | 'signed-out' | 'no-access' | 'error' | 'ok';
+
+const SYNC_ICONS = { running: RefreshCw, 'signed-out': CloudOff, 'no-access': CloudOff, error: CloudAlert, ok: CloudCheck };
+
+function SyncStatus() {
+  const mode = useStore((s) => s.mode);
+  const account = useStore((s) => s.account);
+  const authed = useStore((s) => s.authed);
+  const driveAccess = useStore((s) => s.driveAccess);
+  const running = useStore((s) => s.syncRunning);
+  const error = useStore((s) => s.syncError);
+  const meta = useStore((s) => s.syncMeta);
+  const syncNow = useStore((s) => s.syncNow);
+  const connectDrive = useStore((s) => s.connectDrive);
+  const signIn = useStore((s) => s.signIn);
+  const [open, setOpen] = useState(false);
+
+  if (mode !== 'live' || !account) return null;
+
+  const state: SyncState = running ? 'running' : !authed ? 'signed-out' : !driveAccess ? 'no-access' : error ? 'error' : 'ok';
+  const label = {
+    running: '드라이브와 맞추는 중',
+    'signed-out': meta.dirty ? '드라이브에 저장하지 않은 변경이 있어요' : '로그인하면 드라이브와 맞춰요',
+    'no-access': '드라이브 연결이 필요해요',
+    error: '드라이브 동기화에 실패했어요',
+    ok: meta.dirty ? '곧 드라이브에 저장해요' : '드라이브에 저장됨',
+  }[state];
+  const Icon = SYNC_ICONS[state];
+
+  return (
+    <Popover
+      open={open}
+      onClose={() => setOpen(false)}
+      trigger={
+        <button
+          type="button"
+          className={`icon-btn sync-btn is-${state}${meta.dirty ? ' is-dirty' : ''}`}
+          onClick={() => setOpen((o) => !o)}
+          aria-label={label}
+          aria-expanded={open}
+          title={label}
+        >
+          <Icon size={18} className={state === 'running' ? 'spin' : undefined} />
+        </button>
+      }
+    >
+      <div className="menu-account">
+        <strong>{label}</strong>
+        <span className="muted">{meta.lastSyncAt ? `마지막 동기화 ${timeAgo(meta.lastSyncAt)}` : '아직 동기화하지 않았어요'}</span>
+      </div>
+      {state === 'error' && <p className="menu-error">{error}</p>}
+      <p className="menu-help">그룹과 구독 취소 기록을 내 구글 드라이브의 앱 전용 공간에 저장해서, 다른 기기에서 로그인해도 같게 보여요.</p>
+      <div className="menu-sep" />
+      {state === 'signed-out' && (
+        <button
+          type="button"
+          className="menu-item"
+          onClick={() => {
+            setOpen(false);
+            signIn();
+          }}
+        >
+          <LogIn size={16} /> 로그인
+        </button>
+      )}
+      {state === 'no-access' && (
+        <button
+          type="button"
+          className="menu-item"
+          onClick={() => {
+            setOpen(false);
+            connectDrive();
+          }}
+        >
+          <Cloud size={16} /> 드라이브 연결
+        </button>
+      )}
+      {(state === 'ok' || state === 'error') && (
+        <button
+          type="button"
+          className="menu-item"
+          onClick={() => {
+            setOpen(false);
+            syncNow();
+          }}
+        >
+          <RefreshCw size={16} /> 지금 동기화
+        </button>
+      )}
+    </Popover>
+  );
+}
 
 function QuotaPill() {
   const used = useStore((s) => s.quotaUsed);
@@ -138,7 +246,11 @@ function AccountMenu() {
         }
       >
         <p>불러온 구독 목록, 그룹, 구독 취소 기록을 이 브라우저에서 지우고 로그아웃해요. YouTube 구독은 바뀌지 않아요.</p>
-        <p className="muted">그룹을 남겨 두려면 먼저 메뉴에서 백업 파일을 내보내세요.</p>
+        {mode === 'live' ? (
+          <p className="muted">드라이브에 저장된 그룹과 기록은 지워지지 않아서, 다시 로그인하면 돌아와요.</p>
+        ) : (
+          <p className="muted">샘플 데이터가 처음 상태로 돌아가요.</p>
+        )}
       </Dialog>
     </>
   );
@@ -313,6 +425,7 @@ export function Header() {
       </div>
       <div className="header-right">
         <QuotaPill />
+        <SyncStatus />
         {account && mode === 'live' && !authed && (
           <button type="button" className="btn btn-primary btn-sm" onClick={() => signIn()}>
             <LogIn size={15} /> 로그인

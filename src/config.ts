@@ -2,6 +2,13 @@ export const GOOGLE_CLIENT_ID = (import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '').tr
 
 /** Needed for subscriptions.delete / insert; the read-only scope cannot unsubscribe. */
 export const YT_SCOPE = 'https://www.googleapis.com/auth/youtube';
+/** Only the app's own hidden folder in Drive, used to sync groups between devices. */
+export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+
+/** Wait this long after the last edit before saving to Drive. */
+export const SYNC_DEBOUNCE_MS = 1500;
+/** When the tab becomes visible again, pull from Drive if the last sync is older than this. */
+export const SYNC_STALE_MS = 60 * 1000;
 
 /** Default YouTube Data API quota per Google Cloud project per day. */
 export const DAILY_QUOTA = 10_000;

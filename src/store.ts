@@ -9,13 +9,15 @@ import type {
   Subscription,
   UnsubLogEntry,
 } from './types';
-import { GOOGLE_CLIENT_ID, SUBS_AUTO_SYNC_MS } from './config';
+import { GOOGLE_CLIENT_ID, SUBS_AUTO_SYNC_MS, SYNC_DEBOUNCE_MS, SYNC_STALE_MS } from './config';
 import { ApiError, AuthError, isFatal, setCostListener, uploadsPlaylistFor, type Prompt, type YouTubeApi } from './lib/api';
-import { initAuth } from './lib/auth';
+import { hasDriveAccess, initAuth } from './lib/auth';
 import { db } from './lib/db';
 import { demoApi, demoGroups, resetDemo } from './lib/demo';
+import { DriveError, createAppFile, findAppFile, readAppFile, updateAppFile } from './lib/drive';
 import { formatNumber } from './lib/format';
 import { addQuota, readQuota } from './lib/quota';
+import { mergeSyncData, parseSyncDoc, sameSyncData, toSyncDoc, type SyncData } from './lib/sync';
 import { liveApi } from './lib/youtube';
 
 export const ALL = '__all';
@@ -36,6 +38,13 @@ export interface Toast {
   kind: 'info' | 'success' | 'error';
 }
 
+export interface SyncMeta {
+  fileId: string | null;
+  /** Edits not yet saved to Drive. */
+  dirty: boolean;
+  lastSyncAt: number | null;
+}
+
 /** Everything saved per account in IndexedDB. */
 interface Data {
   subs: Subscription[];
@@ -43,12 +52,28 @@ interface Data {
   stats: Record<string, ChannelStats>;
   activity: Record<string, ChannelActivity>;
   groups: Group[];
+  deletedGroups: Record<string, number>;
   feedSeen: Record<string, number>;
   unsubLog: UnsubLogEntry[];
+  removedLog: Record<string, number>;
+  syncMeta: SyncMeta;
 }
 
 type DataKey = keyof Data;
-const DATA_KEYS: DataKey[] = ['subs', 'subsSyncedAt', 'stats', 'activity', 'groups', 'feedSeen', 'unsubLog'];
+const DATA_KEYS: DataKey[] = [
+  'subs',
+  'subsSyncedAt',
+  'stats',
+  'activity',
+  'groups',
+  'deletedGroups',
+  'feedSeen',
+  'unsubLog',
+  'removedLog',
+  'syncMeta',
+];
+/** Keys shared between devices through Drive; the rest can be refetched from YouTube. */
+const SYNCED_KEYS: DataKey[] = ['groups', 'deletedGroups', 'feedSeen', 'unsubLog', 'removedLog'];
 
 const emptyData = (): Data => ({
   subs: [],
@@ -56,8 +81,19 @@ const emptyData = (): Data => ({
   stats: {},
   activity: {},
   groups: [],
+  deletedGroups: {},
   feedSeen: {},
   unsubLog: [],
+  removedLog: {},
+  syncMeta: { fileId: null, dirty: false, lastSyncAt: null },
+});
+
+const syncDataOf = (d: Data): SyncData => ({
+  groups: d.groups,
+  deletedGroups: d.deletedGroups,
+  unsubLog: d.unsubLog,
+  removedLog: d.removedLog,
+  feedSeen: d.feedSeen,
 });
 
 export interface State extends Data {
@@ -66,6 +102,10 @@ export interface State extends Data {
   initError: string | null;
   account: Account | null;
   authed: boolean;
+  /** The token also carries the Drive permission. */
+  driveAccess: boolean;
+  syncRunning: boolean;
+  syncError: string | null;
   quotaUsed: number;
   task: Task | null;
   toasts: Toast[];
@@ -77,6 +117,9 @@ export interface State extends Data {
   signOut(): void;
   forgetAccount(): Promise<void>;
   checkAuth(): void;
+  connectDrive(): Promise<void>;
+  syncNow(): Promise<void>;
+  syncIfStale(): void;
   syncSubscriptions(): Promise<void>;
   scanActivity(channelIds: string[], label: string): Promise<void>;
   unsubscribe(channelIds: string[]): Promise<void>;
@@ -107,6 +150,12 @@ let toastSeq = 0;
 const namespace = (mode: Mode, account: Account) => `${mode}:${account.channelId ?? 'default'}`;
 
 export const useStore = create<State>()((set, get) => {
+  // Counts local edits to synced data, so a sync can tell whether more edits arrived while it ran.
+  let editSeq = 0;
+  let syncTimer: ReturnType<typeof setTimeout> | undefined;
+  let syncing = false;
+  let syncAgain = false;
+
   const toast = (text: string, kind: Toast['kind'] = 'info') => {
     const id = ++toastSeq;
     set((s) => ({ toasts: [...s.toasts.slice(-3), { id, text, kind }] }));
@@ -122,6 +171,28 @@ export const useStore = create<State>()((set, get) => {
     );
   };
 
+  const canSync = () => {
+    const s = get();
+    return s.mode === 'live' && s.account !== null && hasDriveAccess();
+  };
+
+  const scheduleSync = () => {
+    clearTimeout(syncTimer);
+    if (canSync()) syncTimer = setTimeout(() => void get().syncNow(), SYNC_DEBOUNCE_MS);
+  };
+
+  /** Saves changed keys; edits to groups and the log are also sent to Drive shortly after. */
+  const commit = (...keys: DataKey[]) => {
+    if (!keys.some((k) => SYNCED_KEYS.includes(k))) {
+      persist(...keys);
+      return;
+    }
+    editSeq++;
+    set((s) => ({ syncMeta: { ...s.syncMeta, dirty: true } }));
+    persist(...keys, 'syncMeta');
+    scheduleSync();
+  };
+
   const rememberAccount = (account: Account) => {
     db.set(`${get().mode}:lastAccount`, account).catch(() => {});
   };
@@ -133,14 +204,14 @@ export const useStore = create<State>()((set, get) => {
     DATA_KEYS.forEach((k, i) => {
       if (values[i] !== undefined) Object.assign(data, { [k]: values[i] });
     });
-    set({ ...data, account, groupKey: ALL });
+    set({ ...data, account, groupKey: ALL, syncError: null });
     rememberAccount(account);
   };
 
   const handleError = (e: unknown) => {
     if (e instanceof AuthError) {
       if (e.code === 'superseded') return;
-      if (e.code === 'expired') set({ authed: false });
+      if (e.code === 'expired') set({ authed: false, driveAccess: false });
       toast(e.message, e.code === 'popup_closed' ? 'info' : 'error');
       return;
     }
@@ -157,18 +228,20 @@ export const useStore = create<State>()((set, get) => {
    * Call it before any other await in a click handler so the login popup may open.
    * Resolves true when the login switched to another channel.
    */
-  const authorize = async (prompt: Prompt = ''): Promise<boolean> => {
-    const fresh = await api.ensureAuth(prompt);
-    set({ authed: true });
+  const authorize = async (prompt: Prompt = '', force = false): Promise<boolean> => {
+    const fresh = await api.ensureAuth(prompt, force);
+    set({ authed: true, driveAccess: get().mode === 'live' && hasDriveAccess() });
     const previous = get().account;
     if (!fresh && previous) return false;
     const account = await api.fetchMyChannel();
     if (previous && previous.channelId === account.channelId) {
       set({ account });
       rememberAccount(account);
+      void get().syncNow();
       return false;
     }
     await loadAccount(account);
+    void get().syncNow();
     if (previous) toast(`'${account.title}' 계정으로 로그인해서 이 계정의 데이터로 바꿨어요.`);
     return previous !== null;
   };
@@ -201,6 +274,9 @@ export const useStore = create<State>()((set, get) => {
     }
   };
 
+  const withGroup = (id: string, change: (g: Group) => Group) =>
+    set((s) => ({ groups: s.groups.map((g) => (g.id === id ? change(g) : g)) }));
+
   return {
     ...emptyData(),
     mode: 'live',
@@ -208,6 +284,9 @@ export const useStore = create<State>()((set, get) => {
     initError: null,
     account: null,
     authed: false,
+    driveAccess: false,
+    syncRunning: false,
+    syncError: null,
     quotaUsed: 0,
     task: null,
     toasts: [],
@@ -217,7 +296,12 @@ export const useStore = create<State>()((set, get) => {
     async init(mode) {
       api = mode === 'demo' ? demoApi : liveApi;
       setCostListener((units) => set({ quotaUsed: addQuota(mode, units) }));
-      set({ mode, quotaUsed: readQuota(mode), authed: api.hasValidToken() });
+      set({
+        mode,
+        quotaUsed: readQuota(mode),
+        authed: api.hasValidToken(),
+        driveAccess: mode === 'live' && hasDriveAccess(),
+      });
       const last = await db.get<Account>(`${mode}:lastAccount`).catch(() => undefined);
       if (last) await loadAccount(last);
       if (mode === 'live' && GOOGLE_CLIENT_ID) {
@@ -229,6 +313,8 @@ export const useStore = create<State>()((set, get) => {
       }
       set({ ready: true });
       if (mode === 'demo' && !last) await get().signIn();
+      // A token kept from earlier in this tab: pick up edits made on other devices.
+      void get().syncNow();
     },
 
     async signIn(prompt = '') {
@@ -243,7 +329,7 @@ export const useStore = create<State>()((set, get) => {
         await get().syncSubscriptions();
         if (!get().groups.length) {
           set({ groups: demoGroups() });
-          persist('groups');
+          commit('groups');
         }
         return;
       }
@@ -252,18 +338,28 @@ export const useStore = create<State>()((set, get) => {
 
     signOut() {
       api.signOut();
-      set({ authed: false });
+      clearTimeout(syncTimer);
+      set({ authed: false, driveAccess: false });
       toast('로그아웃했어요. 불러온 목록과 그룹은 이 브라우저에 남아 있어요.');
     },
 
     async forgetAccount() {
       const s = get();
       api.signOut();
+      clearTimeout(syncTimer);
       if (s.account) {
         const ns = namespace(s.mode, s.account);
         await db.delMany([...DATA_KEYS.map((k) => `${ns}:${k}`), `${s.mode}:lastAccount`]).catch(() => {});
       }
-      set({ ...emptyData(), account: null, authed: api.hasValidToken(), view: 'channels', groupKey: ALL });
+      set({
+        ...emptyData(),
+        account: null,
+        authed: api.hasValidToken(),
+        driveAccess: false,
+        syncError: null,
+        view: 'channels',
+        groupKey: ALL,
+      });
       // The sample has no login screen, so start it over.
       if (s.mode === 'demo') {
         resetDemo();
@@ -273,7 +369,91 @@ export const useStore = create<State>()((set, get) => {
 
     checkAuth() {
       const authed = api.hasValidToken();
-      if (authed !== get().authed) set({ authed });
+      const driveAccess = get().mode === 'live' && hasDriveAccess();
+      if (authed !== get().authed || driveAccess !== get().driveAccess) set({ authed, driveAccess });
+    },
+
+    async connectDrive() {
+      try {
+        // A new token request: the consent screen then asks for the missing Drive permission.
+        await authorize('', true);
+      } catch (e) {
+        handleError(e);
+        return;
+      }
+      if (!hasDriveAccess()) {
+        toast('드라이브 권한이 허용되지 않았어요. 권한 요청 화면에서 드라이브 항목에 체크해 주세요.', 'error');
+      }
+    },
+
+    async syncNow() {
+      if (!canSync()) return;
+      if (syncing) {
+        syncAgain = true;
+        return;
+      }
+      syncing = true;
+      clearTimeout(syncTimer);
+      set({ syncRunning: true });
+      const account = get().account!;
+      const name = `submanager-${account.channelId ?? 'default'}.json`;
+      const sameAccount = () => get().account?.channelId === account.channelId;
+      try {
+        let fileId = get().syncMeta.fileId;
+        let remote: SyncData | null = null;
+        if (fileId) {
+          try {
+            remote = parseSyncDoc(await readAppFile(fileId));
+          } catch (e) {
+            if (!(e instanceof DriveError && e.status === 404)) throw e;
+            fileId = null;
+          }
+        }
+        if (!fileId) {
+          fileId = await findAppFile(name);
+          if (fileId) remote = parseSyncDoc(await readAppFile(fileId));
+        }
+        if (!sameAccount()) return;
+
+        // Merge with what is in the browser right now, so edits made during the requests are kept.
+        const seq = editSeq;
+        const local = syncDataOf(get());
+        const merged = remote ? mergeSyncData(local, remote) : local;
+        if (!sameSyncData(merged, local)) {
+          set((s) => ({
+            ...merged,
+            groupKey: s.groupKey.startsWith('__') || merged.groups.some((g) => g.id === s.groupKey) ? s.groupKey : ALL,
+          }));
+          persist(...SYNCED_KEYS);
+        }
+        if (!remote || !sameSyncData(merged, remote)) {
+          const doc = toSyncDoc(merged);
+          if (fileId) await updateAppFile(fileId, doc);
+          else fileId = await createAppFile(name, doc);
+        }
+        if (!sameAccount()) return;
+        set({ syncError: null, syncMeta: { fileId, dirty: editSeq !== seq, lastSyncAt: Date.now() } });
+        persist('syncMeta');
+      } catch (e) {
+        if (e instanceof DriveError && e.status === 401) set({ authed: false, driveAccess: false });
+        if (e instanceof DriveError && e.reason === 'insufficientPermissions') set({ driveAccess: false });
+        set({ syncError: e instanceof Error ? e.message : String(e) });
+      } finally {
+        syncing = false;
+        set({ syncRunning: false });
+        if (syncAgain) {
+          syncAgain = false;
+          void get().syncNow();
+        }
+      }
+    },
+
+    syncIfStale() {
+      const { syncMeta } = get();
+      if (!canSync()) return;
+      if (syncMeta.dirty || !syncMeta.lastSyncAt || Date.now() - syncMeta.lastSyncAt > SYNC_STALE_MS) {
+        void get().syncNow();
+      }
     },
 
     syncSubscriptions: () =>
@@ -285,14 +465,9 @@ export const useStore = create<State>()((set, get) => {
           items.map((i) => i.channelId),
           (done, t) => progress(done, t),
         );
-        const ids = new Set(items.map((i) => i.channelId));
-        set((s) => ({
-          subs: items,
-          subsSyncedAt: Date.now(),
-          stats: { ...s.stats, ...stats },
-          groups: s.groups.map((g) => ({ ...g, channelIds: g.channelIds.filter((id) => ids.has(id)) })),
-        }));
-        persist('subs', 'subsSyncedAt', 'stats', 'groups');
+        // Groups keep channels that are no longer subscribed; lists only show subscribed ones.
+        set((s) => ({ subs: items, subsSyncedAt: Date.now(), stats: { ...s.stats, ...stats } }));
+        persist('subs', 'subsSyncedAt', 'stats');
         toast(`구독 채널 ${formatNumber(items.length)}개를 불러왔어요.`, 'success');
         if (total - items.length > 5) {
           toast(`YouTube가 알려준 구독 수보다 ${total - items.length}개 적게 불러왔어요. 정지됐거나 비공개로 바뀐 채널일 수 있어요.`);
@@ -386,12 +561,17 @@ export const useStore = create<State>()((set, get) => {
           }
           // Save what succeeded even when the batch stopped early.
           if (removed.size) {
+            const now = Date.now();
             set((s) => ({
               subs: s.subs.filter((x) => !removed.has(x.channelId)),
-              groups: s.groups.map((g) => ({ ...g, channelIds: g.channelIds.filter((id) => !removed.has(id)) })),
+              groups: s.groups.map((g) =>
+                g.channelIds.some((id) => removed.has(id))
+                  ? { ...g, channelIds: g.channelIds.filter((id) => !removed.has(id)), updatedAt: now }
+                  : g,
+              ),
               unsubLog: [...logs.reverse(), ...s.unsubLog].slice(0, 500),
             }));
-            persist('subs', 'groups', 'unsubLog');
+            commit('subs', 'groups', 'unsubLog');
             toast(`채널 ${removed.size}개의 구독을 취소했어요.`, 'success');
           }
           if (failed) toast(`채널 ${failed}개는 구독을 취소하지 못했어요.`, 'error');
@@ -413,16 +593,18 @@ export const useStore = create<State>()((set, get) => {
             if (!(e instanceof ApiError && e.reason === 'subscriptionDuplicate')) throw e;
           }
           const sub = added;
+          const now = Date.now();
           set((s) => ({
             subs: sub && !s.subs.some((x) => x.channelId === channelId) ? [...s.subs, sub] : s.subs,
             unsubLog: s.unsubLog.filter((l) => l.channelId !== channelId),
+            removedLog: { ...s.removedLog, [channelId]: now },
             groups: s.groups.map((g) =>
               entry?.groupIds.includes(g.id) && !g.channelIds.includes(channelId)
-                ? { ...g, channelIds: [...g.channelIds, channelId] }
+                ? { ...g, channelIds: [...g.channelIds, channelId], updatedAt: now }
                 : g,
             ),
           }));
-          persist('subs', 'unsubLog', 'groups');
+          commit('subs', 'unsubLog', 'removedLog', 'groups');
           toast(sub ? `'${sub.title}' 채널을 다시 구독했어요.` : '이미 구독 중인 채널이라 기록에서 지웠어요.', 'success');
         },
         { total: 1 },
@@ -440,16 +622,18 @@ export const useStore = create<State>()((set, get) => {
       const used = new Set(groups.map((g) => g.color));
       const color = GROUP_COLORS.find((c) => !used.has(c)) ?? GROUP_COLORS[groups.length % GROUP_COLORS.length];
       const id = `g_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-      set({ groups: [...groups, { id, name: trimmed, color, channelIds: [...new Set(channelIds)] }] });
-      persist('groups');
+      set({
+        groups: [...groups, { id, name: trimmed, color, channelIds: [...new Set(channelIds)], updatedAt: Date.now() }],
+      });
+      commit('groups');
       return id;
     },
 
     renameGroup(id, name) {
       const trimmed = name.trim().slice(0, 40);
       if (!trimmed) return;
-      set((s) => ({ groups: s.groups.map((g) => (g.id === id ? { ...g, name: trimmed } : g)) }));
-      persist('groups');
+      withGroup(id, (g) => (g.name === trimmed ? g : { ...g, name: trimmed, updatedAt: Date.now() }));
+      commit('groups');
     },
 
     deleteGroup(id) {
@@ -458,28 +642,29 @@ export const useStore = create<State>()((set, get) => {
         delete feedSeen[id];
         return {
           groups: s.groups.filter((g) => g.id !== id),
+          deletedGroups: { ...s.deletedGroups, [id]: Date.now() },
           feedSeen,
           groupKey: s.groupKey === id ? ALL : s.groupKey,
         };
       });
-      persist('groups', 'feedSeen');
+      commit('groups', 'deletedGroups', 'feedSeen');
     },
 
     addToGroup(id, channelIds) {
-      set((s) => ({
-        groups: s.groups.map((g) =>
-          g.id === id ? { ...g, channelIds: [...new Set([...g.channelIds, ...channelIds])] } : g,
-        ),
-      }));
-      persist('groups');
+      withGroup(id, (g) => {
+        const next = [...new Set([...g.channelIds, ...channelIds])];
+        return next.length === g.channelIds.length ? g : { ...g, channelIds: next, updatedAt: Date.now() };
+      });
+      commit('groups');
     },
 
     removeFromGroup(id, channelIds) {
       const drop = new Set(channelIds);
-      set((s) => ({
-        groups: s.groups.map((g) => (g.id === id ? { ...g, channelIds: g.channelIds.filter((c) => !drop.has(c)) } : g)),
-      }));
-      persist('groups');
+      withGroup(id, (g) => {
+        const next = g.channelIds.filter((c) => !drop.has(c));
+        return next.length === g.channelIds.length ? g : { ...g, channelIds: next, updatedAt: Date.now() };
+      });
+      commit('groups');
     },
 
     toggleInGroup(id, channelId) {
@@ -491,7 +676,7 @@ export const useStore = create<State>()((set, get) => {
 
     markFeedSeen(key) {
       set((s) => ({ feedSeen: { ...s.feedSeen, [key]: Date.now() } }));
-      persist('feedSeen');
+      commit('feedSeen');
     },
 
     exportBackup() {
@@ -508,8 +693,23 @@ export const useStore = create<State>()((set, get) => {
     },
 
     importBackup(backup) {
-      set({ groups: backup.groups, unsubLog: backup.unsubLog, feedSeen: backup.feedSeen, groupKey: ALL });
-      persist('groups', 'unsubLog', 'feedSeen');
+      const now = Date.now();
+      set((s) => {
+        // The backup replaces the groups: current groups missing from it count as deleted now,
+        // and imported groups count as edited now so they win on other devices too.
+        const incoming = new Set(backup.groups.map((g) => g.id));
+        const deletedGroups: Record<string, number> = {};
+        for (const g of s.groups) if (!incoming.has(g.id)) deletedGroups[g.id] = now;
+        const imported: SyncData = {
+          groups: backup.groups.map((g) => ({ ...g, updatedAt: now })),
+          deletedGroups,
+          unsubLog: backup.unsubLog,
+          removedLog: {},
+          feedSeen: backup.feedSeen,
+        };
+        return { ...mergeSyncData(syncDataOf(s), imported, now), groupKey: ALL };
+      });
+      commit(...SYNCED_KEYS);
       toast(`백업에서 그룹 ${backup.groups.length}개를 가져왔어요.`, 'success');
     },
 

@@ -234,8 +234,9 @@ export function resetDemo() {
 export function demoGroups(): Group[] {
   const pick = (topic: Topic, count: number) =>
     channels.filter((c) => c.topic === topic).slice(0, count).map((c) => c.id);
+  const now = Date.now();
   return [
-    { id: 'g_demo_cook', name: '요리', color: '#f76b15', channelIds: pick('cook', 5) },
-    { id: 'g_demo_dev', name: '개발 공부', color: '#0090ff', channelIds: pick('dev', 6) },
+    { id: 'g_demo_cook', name: '요리', color: '#f76b15', channelIds: pick('cook', 5), updatedAt: now },
+    { id: 'g_demo_dev', name: '개발 공부', color: '#0090ff', channelIds: pick('dev', 6), updatedAt: now },
   ];
 }

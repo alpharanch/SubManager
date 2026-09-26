@@ -124,8 +124,8 @@ async function call<T>(
 }
 
 export const liveApi: YouTubeApi = {
-  async ensureAuth(prompt = '') {
-    if (!prompt && auth.hasValidToken()) return false;
+  async ensureAuth(prompt = '', force = false) {
+    if (!force && !prompt && auth.hasValidToken()) return false;
     await auth.requestToken(prompt);
     return true;
   },

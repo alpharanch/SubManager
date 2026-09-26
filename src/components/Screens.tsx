@@ -59,6 +59,10 @@ export function SetupScreen() {
             <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">
               YouTube Data API v3
             </a>
+            와{' '}
+            <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noreferrer">
+              Google Drive API
+            </a>
             를 사용 설정해요.
           </li>
           <li>
@@ -121,8 +125,9 @@ export function LoginScreen() {
           </a>
         </div>
         <ul className="notes">
-          <li>구독 목록과 그룹은 이 브라우저에만 저장되고, 다른 서버로 보내지 않아요.</li>
+          <li>그룹과 구독 취소 기록은 내 구글 드라이브의 앱 전용 공간에 저장돼서 다른 기기에서도 같게 보여요. 다른 서버로는 보내지 않아요.</li>
           <li>‘Google에서 확인하지 않은 앱’ 화면이 나오면 계속을 눌러 주세요. 직접 만든 앱이라 나오는 화면이에요.</li>
+          <li>권한 요청 화면에서 YouTube와 드라이브 항목에 모두 체크해 주세요.</li>
           <li>브랜드 계정 채널을 쓴다면 계정 선택 화면에서 그 채널을 골라 주세요.</li>
         </ul>
       </div>
